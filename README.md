@@ -57,7 +57,7 @@ See the accompanying paper for full validation details.
 
 If you use this toolbox in your research, please cite:
 
-> [Author]. (2026). Dot Array Stimulus Toolbox: An Open-Source Solution for Generating and Analyzing Non-Symbolic Number Stimuli. *Manuscript in preparation.*
+> Aulet, L.S. (2026). Dot Array Stimulus Toolbox: An Open-Source Solution for Generating and Analyzing Non-Symbolic Number Stimuli. *Manuscript in preparation.*
 
 ## License
 
