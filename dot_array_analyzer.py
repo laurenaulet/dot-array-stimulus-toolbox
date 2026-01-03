@@ -82,7 +82,7 @@ def detect_dots(image: np.ndarray) -> Tuple[List[np.ndarray], np.ndarray]:
     for mask in masks:
         kernel = np.ones((3, 3), np.uint8)
         cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel, iterations=2)
+        #cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel, iterations=2)
         
         contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
