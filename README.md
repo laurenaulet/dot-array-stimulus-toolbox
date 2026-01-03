@@ -4,8 +4,8 @@ An open-source Python toolbox for generating and analyzing dot array stimuli use
 
 ## 🌐 Use Online (No Installation Required)
 
-- **[Stimulus Generator](https://dot-array-stimulus-tool-generator.streamlit.app)** — Create dot arrays with controlled visual parameters
-- **[Stimulus Analyzer](https://dot-array-stimulus-tool-analyzer.streamlit.app)** — Extract visual parameters from existing dot array images
+- **[Stimulus Generator](https://dot-array-stimulus-toolbox-generator.streamlit.app)** — Create dot arrays with controlled visual parameters
+- **[Stimulus Analyzer](https://dot-array-stimulus-toolbox-analyzer.streamlit.app)** — Extract visual parameters from existing dot array images
 
 ## Features
 
