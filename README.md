@@ -1,6 +1,7 @@
 # Dot Array Stimulus Toolbox (DAST)
 
 An open-source Python toolbox for generating and analyzing dot array stimuli used in numerical cognition research.
+Preprint here: https://osf.io/preprints/psyarxiv/uhsv6_v1
 
 ## 🌐 Use Online (No Installation Required)
 
@@ -57,7 +58,7 @@ See the accompanying paper for full validation details.
 
 If you use this toolbox in your research, please cite:
 
-> Aulet, L.S. (2026). Dot Array Stimulus Toolbox: An Open-Source Solution for Generating and Analyzing Non-Symbolic Number Stimuli. *Manuscript in preparation.*
+> Aulet, L.S. (2026). Dot Array Stimulus Toolbox: An Open-Source Solution for Generating and Analyzing Non-Symbolic Number Stimuli. _PsyArXiv_.
 
 ## License
 
