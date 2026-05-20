@@ -443,36 +443,124 @@ col1, col2, col3 = st.columns(3)
 
 with col1:
     st.subheader("Numerosity")
-    n_mode = st.radio("Number of dots", ["Fixed", "Range"], horizontal=True)
-    
+    n_mode = st.radio("Number of dots", ["Fixed", "Range", "List"], horizontal=True)
+
+    # n_list holds explicit numerosities when in List mode; otherwise None.
+    n_list = None
     if n_mode == "Fixed":
         n_dots = st.number_input("N", min_value=1, max_value=500, value=20)
         n_range = (n_dots, n_dots)
-    else:
+    elif n_mode == "Range":
         n_min = st.number_input("Min N", min_value=1, max_value=500, value=5)
         n_max = st.number_input("Max N", min_value=1, max_value=500, value=30)
         n_range = (min(n_min, n_max), max(n_min, n_max))
-    
-    num_stimuli = st.number_input("Number of stimuli to generate", 
-                                   min_value=1, max_value=1000, value=10)
+    else:  # List
+        n_list_raw = st.text_input(
+            "Numerosities (comma-separated)",
+            value="",
+            placeholder="e.g. 8, 10, 12, 16, 20",
+            help="Generate the same number of exemplars for each numerosity in one run."
+        )
+        # Lenient parse: strip whitespace, drop empties/junk, coerce to int,
+        # keep only valid values, dedupe while preserving order.
+        parsed, junk, seen = [], [], set()
+        for tok in n_list_raw.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                val = int(tok)
+            except ValueError:
+                junk.append(tok)
+                continue
+            if val < 1 or val > 500:
+                junk.append(tok)
+                continue
+            if val in seen:
+                continue
+            seen.add(val)
+            parsed.append(val)
+        n_list = parsed
+        n_range = None
+        if junk:
+            st.warning(f"Ignored entries that aren't whole numbers 1–500: {', '.join(junk)}")
+        # Detect duplicates explicitly for the dedupe note.
+        raw_ints = []
+        for tok in n_list_raw.split(","):
+            tok = tok.strip()
+            if tok:
+                try:
+                    raw_ints.append(int(tok))
+                except ValueError:
+                    pass
+        if len(raw_ints) > len(set(raw_ints)):
+            st.info("Duplicate numerosities were removed; each value is generated once.")
+
+    if n_mode == "List":
+        num_stimuli = st.number_input("Exemplars per numerosity",
+                                       min_value=1, max_value=1000, value=10)
+        if n_list:
+            st.caption(f"Will generate {len(n_list)} × {num_stimuli} = "
+                       f"{len(n_list) * num_stimuli} stimuli total.")
+    else:
+        num_stimuli = st.number_input("Number of stimuli to generate",
+                                       min_value=1, max_value=1000, value=10)
 
 with col2:
     st.subheader("Dot Size")
-    avg_radius = st.slider("Average radius (px)", 
+    avg_radius = st.slider("Average radius (px)",
                            min_value=3, max_value=50, value=15)
-    size_variability = st.slider("Size variability (SD of radius)", 
-                                  min_value=0.0, max_value=20.0, value=0.0, step=0.5)
-    min_radius = st.slider("Minimum radius (px)", 
+    min_radius = st.slider("Minimum radius (px)",
                            min_value=2, max_value=20, value=5)
-    
+
+    # Size variability (dispersion of dot sizes): Constant or Varied across pool.
+    var_mode = st.radio("Size variability", ["Constant", "Varied"], horizontal=True,
+                        help="SD of dot radius. Varied samples a different SD per "
+                             "stimulus, so item-size dispersion spreads across the pool.")
+    if var_mode == "Constant":
+        size_variability = st.slider("SD of radius",
+                                     min_value=0.0, max_value=20.0, value=0.0, step=0.5)
+        var_range = None
+    else:
+        vc1, vc2 = st.columns(2)
+        with vc1:
+            var_min = st.slider("Min SD", min_value=0.0, max_value=20.0, value=0.0, step=0.5)
+        with vc2:
+            var_max = st.slider("Max SD", min_value=0.0, max_value=20.0, value=6.0, step=0.5)
+        var_range = (min(var_min, var_max), max(var_min, var_max))
+        size_variability = None
+
     st.markdown("---")
-    control_area = st.checkbox("Control cumulative area", value=False,
-                               help="Scale dot sizes to achieve target total area")
-    if control_area:
-        target_area = st.number_input("Target cumulative area (px²)", 
-                                       min_value=100, max_value=100000, value=5000)
+
+    # Total cumulative area: Off / Constant / Varied.
+    area_mode = st.radio(
+        "Total area control",
+        ["Off", "Constant", "Varied"],
+        index=0,
+        help="Off: dot size set by average radius above. Constant: scale dots to one "
+             "total area. Varied: sample total area per stimulus from a range, for "
+             "building a pool to decorrelate area from number after the fact."
+    )
+    if area_mode == "Constant":
+        target_area = st.number_input("Target cumulative area (px²)",
+                                      min_value=100, max_value=100000, value=5000)
+        area_range = None
+        st.caption("Overrides average radius: dots are scaled to hit this total area.")
+    elif area_mode == "Varied":
+        target_area = None
+        ac1, ac2 = st.columns(2)
+        with ac1:
+            area_min = st.number_input("Min total area (px²)",
+                                       min_value=100, max_value=100000, value=3000)
+        with ac2:
+            area_max = st.number_input("Max total area (px²)",
+                                       min_value=100, max_value=100000, value=9000)
+        area_range = (min(area_min, area_max), max(area_min, area_max))
+        st.caption("Overrides average radius. At fixed N, total area sets mean dot size, "
+                   "so varying it varies item size; size variability adds dispersion on top.")
     else:
         target_area = None
+        area_range = None
 
 with col3:
     st.subheader("Layout & Appearance")
@@ -543,17 +631,32 @@ with preview_col1:
             prev_bg = (0, 0, 0)
             prev_dot = (255, 255, 255)
         
-        # Use middle of range for preview
-        preview_n = (n_range[0] + n_range[1]) // 2 if n_range[0] != n_range[1] else n_range[0]
-        
+        # Use a representative N for preview across all modes
+        if n_mode == "List":
+            preview_n = n_list[0] if n_list else 20
+        elif n_range[0] != n_range[1]:
+            preview_n = (n_range[0] + n_range[1]) // 2
+        else:
+            preview_n = n_range[0]
+
+        # Resolve size variability and area target for the preview sample
+        prev_sd = random.uniform(var_range[0], var_range[1]) if var_range else size_variability
+        if area_mode == "Constant" and target_area:
+            prev_control_area, prev_area_target = True, target_area
+        elif area_mode == "Varied" and area_range:
+            prev_control_area = True
+            prev_area_target = random.uniform(area_range[0], area_range[1])
+        else:
+            prev_control_area, prev_area_target = False, None
+
         # Generate sample
         preview_radii = generate_dot_radii(
             n=preview_n,
             avg_radius=avg_radius,
-            size_variability=size_variability,
+            size_variability=prev_sd,
             min_radius=min_radius,
-            control_cumulative_area=control_area,
-            target_cumulative_area=target_area
+            control_cumulative_area=prev_control_area,
+            target_cumulative_area=prev_area_target
         )
         
         if hull_mode.startswith("Constant") and target_hull:
@@ -603,7 +706,12 @@ with preview_col2:
 st.divider()
 
 if st.button("🎲 Generate Stimuli", type="primary", width='stretch'):
-    
+
+    # Guard: List mode needs at least one valid numerosity.
+    if n_mode == "List" and not n_list:
+        st.error("Enter at least one valid numerosity (comma-separated) to generate in List mode.")
+        st.stop()
+
     # Set random seed
     if random_seed > 0:
         random.seed(random_seed)
@@ -616,7 +724,24 @@ if st.button("🎲 Generate Stimuli", type="primary", width='stretch'):
     else:
         bg_color = (0, 0, 0)
         dot_color = (255, 255, 255)
-    
+
+    # Build the job list: each entry is (N, per_N_index). per_N_index counts
+    # exemplars within a numerosity (1-based) and drives List-mode filenames.
+    jobs = []
+    if n_mode == "List":
+        for n_val in n_list:
+            for j in range(num_stimuli):
+                jobs.append((n_val, j + 1))
+    else:
+        for i in range(num_stimuli):
+            if n_range[0] == n_range[1]:
+                n_val = n_range[0]
+            else:
+                n_val = random.randint(n_range[0], n_range[1])
+            jobs.append((n_val, i + 1))
+
+    total_jobs = len(jobs)
+
     # Generate stimuli
     results = []
     images = []
@@ -624,23 +749,37 @@ if st.button("🎲 Generate Stimuli", type="primary", width='stretch'):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    for i in range(num_stimuli):
-        status_text.text(f"Generating stimulus {i+1}/{num_stimuli}...")
-        
-        # Determine N for this stimulus
-        if n_range[0] == n_range[1]:
-            n = n_range[0]
+    for i, (n, per_n_index) in enumerate(jobs):
+        status_text.text(f"Generating stimulus {i+1}/{total_jobs}...")
+
+        # Per-stimulus size variability (SD): sampled in Varied mode.
+        if var_range is not None:
+            this_sd = random.uniform(var_range[0], var_range[1])
         else:
-            n = random.randint(n_range[0], n_range[1])
-        
+            this_sd = size_variability
+
+        # Per-stimulus total-area target and control flag.
+        requested_area = None
+        if area_mode == "Constant" and target_area:
+            control_area = True
+            this_area_target = target_area
+            requested_area = target_area
+        elif area_mode == "Varied" and area_range:
+            control_area = True
+            this_area_target = random.uniform(area_range[0], area_range[1])
+            requested_area = this_area_target
+        else:
+            control_area = False
+            this_area_target = None
+
         # Generate radii
         radii = generate_dot_radii(
             n=n,
             avg_radius=avg_radius,
-            size_variability=size_variability,
+            size_variability=this_sd,
             min_radius=min_radius,
             control_cumulative_area=control_area,
-            target_cumulative_area=target_area
+            target_cumulative_area=this_area_target
         )
         
         # Place dots
@@ -688,15 +827,21 @@ if st.button("🎲 Generate Stimuli", type="primary", width='stretch'):
         )
         
         # Calculate ground truth
-        filename = f"{filename_prefix}_{i+1:04d}.png"
+        if n_mode == "List":
+            # Self-documenting, sortable: stimulus_n08_001.png
+            filename = f"{filename_prefix}_n{n:02d}_{per_n_index:03d}.png"
+        else:
+            filename = f"{filename_prefix}_{i+1:04d}.png"
         metrics = calculate_ground_truth(dots, img_width, img_height, filename)
         if requested_hull is not None:
             metrics['_requested_hull'] = requested_hull
+        if requested_area is not None:
+            metrics['_requested_area'] = requested_area
         
         results.append(metrics)
         images.append((filename, image))
         
-        progress_bar.progress((i + 1) / num_stimuli)
+        progress_bar.progress((i + 1) / total_jobs)
     
     status_text.empty()
     progress_bar.empty()
@@ -740,6 +885,40 @@ if st.button("🎲 Generate Stimuli", type="primary", width='stretch'):
                 + "\n\n".join(messages)
             )
 
+    # --- Reachability check (Varied total area): same logic on cumulative
+    # area. At high N, dots may not fit a large total area without crowding;
+    # at any N, a tiny total area is bounded below by the minimum radius. ---
+    if area_mode == "Varied" and area_range:
+        req_lo, req_hi = area_range
+        span = max(1.0, req_hi - req_lo)
+        edge_band = 0.05 * span
+        by_n = {}
+        for m in results:
+            by_n.setdefault(m['number'], []).append(m['cumulative_area'])
+        messages = []
+        for n_val in sorted(by_n):
+            areas = by_n[n_val]
+            realized_lo, realized_hi = min(areas), max(areas)
+            frac_lo = sum(1 for a in areas if a <= realized_lo + edge_band) / len(areas)
+            frac_hi = sum(1 for a in areas if a >= realized_hi - edge_band) / len(areas)
+            too_small = (realized_lo > req_lo + edge_band) and (frac_lo > 0.20)
+            too_large = (realized_hi < req_hi - edge_band) and (frac_hi > 0.20)
+            if too_small:
+                messages.append(
+                    f"N={n_val}: couldn't reach a total area as small as requested. "
+                    f"Asked from {req_lo:,.0f}; smallest reached was {realized_lo:,.0f} px²."
+                )
+            if too_large:
+                messages.append(
+                    f"N={n_val}: couldn't reach a total area as large as requested. "
+                    f"Asked up to {req_hi:,.0f}; largest reached was {realized_hi:,.0f} px²."
+                )
+        if messages:
+            st.warning(
+                "Some stimuli didn't reach the total-area range you requested:\n\n"
+                + "\n\n".join(messages)
+            )
+
     # --- Degraded-placement check: dots ended up close enough to merge in
     # the rendered image, which can break pixel-based detection downstream. ---
     n_degraded = sum(1 for m in results if m.get('placement_degraded'))
@@ -750,14 +929,15 @@ if st.button("🎲 Generate Stimuli", type="primary", width='stretch'):
             f"Consider fewer or smaller dots, or a larger hull, for those."
         )
 
-    # Strip internal-only key before results reach the table/CSV
+    # Strip internal-only keys before results reach the table/CSV
     for m in results:
         m.pop('_requested_hull', None)
+        m.pop('_requested_area', None)
 
     # Store in session state
     st.session_state['results'] = results
     st.session_state['images'] = images
-    st.success(f"✅ Generated {num_stimuli} stimuli!")
+    st.success(f"✅ Generated {total_jobs} stimuli!")
 
 # Display results if available
 if 'results' in st.session_state and st.session_state['results']:
