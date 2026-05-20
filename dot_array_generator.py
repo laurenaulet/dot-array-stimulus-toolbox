@@ -60,6 +60,7 @@ class GeneratedStimulus:
     avg_nearest_neighbor_distance: float
     image_width: int
     image_height: int
+    placement_degraded: bool = False
 
 
 # ============================================================================
@@ -191,71 +192,98 @@ def place_dots_convex_hull_controlled(
     margin: int,
     min_spacing: float,
     target_hull_area: float,
-    max_attempts: int = 1000
+    max_attempts: int = 1000,
+    calibration_rounds: int = 8,
+    arrangements_per_round: int = 8
 ) -> List[DotSpec]:
     """
-    Place dots with approximate control over convex hull area.
-    Uses rejection sampling to find arrangements near target hull area.
+    Place dots with control over convex hull area.
+
+    The hull of points scattered inside a circle is smaller than the circle
+    itself, and the gap depends on N, so a one-shot radius estimate of
+    sqrt(target/pi) systematically undershoots (worse at low N). Instead we
+    close the loop: place, measure the realized hull, and adjust the placement
+    radius toward the target across several rounds. Hull area scales with the
+    square of the placement radius, so the radius correction uses sqrt of the
+    target/realized ratio.
     """
+    center_x, center_y = width / 2, height / 2
+
+    # Starting guess (same as before); calibration corrects it.
+    placement_radius = math.sqrt(target_hull_area / math.pi)
+    # The placement region can't exceed the image bounds.
+    max_placement_radius = min(width, height) / 2 - margin
+
     best_dots = None
     best_hull_diff = float('inf')
-    
-    # Estimate radius for placement region based on target hull area
-    target_radius = math.sqrt(target_hull_area / math.pi)
-    center_x, center_y = width / 2, height / 2
-    
-    for _ in range(50):  # Try multiple arrangements
+
+    def place_one_round(p_radius: float) -> List[DotSpec]:
         dots = []
-        
         for i in range(n):
             radius = radii[i]
             placed = False
-            
             for _ in range(max_attempts // 10):
-                # Place within circular region around center
                 angle = random.uniform(0, 2 * math.pi)
-                dist = random.uniform(0, target_radius)
+                dist = random.uniform(0, p_radius)
                 x = center_x + dist * math.cos(angle)
                 y = center_y + dist * math.sin(angle)
-                
-                # Clamp to image bounds
                 x = max(margin + radius, min(width - margin - radius, x))
                 y = max(margin + radius, min(height - margin - radius, y))
-                
-                # Check overlap
                 valid = True
                 for existing in dots:
                     d = math.sqrt((x - existing.x)**2 + (y - existing.y)**2)
                     if d < radius + existing.radius + min_spacing:
                         valid = False
                         break
-                
                 if valid:
                     dots.append(DotSpec(x=x, y=y, radius=radius))
                     placed = True
                     break
-            
             if not placed:
-                x = center_x + random.uniform(-target_radius, target_radius)
-                y = center_y + random.uniform(-target_radius, target_radius)
+                x = center_x + random.uniform(-p_radius, p_radius)
+                y = center_y + random.uniform(-p_radius, p_radius)
                 x = max(margin + radius, min(width - margin - radius, x))
                 y = max(margin + radius, min(height - margin - radius, y))
                 dots.append(DotSpec(x=x, y=y, radius=radius))
-        
-        # Calculate hull area
-        if len(dots) >= 3:
-            centroids = [(d.x, d.y) for d in dots]
-            try:
-                hull = ConvexHull(np.array(centroids))
-                hull_area = hull.volume
-                diff = abs(hull_area - target_hull_area)
-                if diff < best_hull_diff:
-                    best_hull_diff = diff
-                    best_dots = dots
-            except:
-                pass
-    
-    return best_dots if best_dots else dots
+        return dots
+
+    def hull_of(dots: List[DotSpec]) -> Optional[float]:
+        if len(dots) < 3:
+            return None
+        try:
+            return ConvexHull(np.array([(d.x, d.y) for d in dots])).volume
+        except Exception:
+            return None
+
+    for _ in range(calibration_rounds):
+        # Sample a few arrangements at the current placement radius; keep the
+        # best overall and track the median realized hull to drive calibration.
+        round_hulls = []
+        for _ in range(arrangements_per_round):
+            dots = place_one_round(placement_radius)
+            h = hull_of(dots)
+            if h is None:
+                continue
+            round_hulls.append(h)
+            diff = abs(h - target_hull_area)
+            if diff < best_hull_diff:
+                best_hull_diff = diff
+                best_dots = dots
+
+        if not round_hulls:
+            break  # can't measure (e.g. n < 3); leave best_dots as-is
+
+        # Adjust placement radius toward target using the round's median hull.
+        median_hull = sorted(round_hulls)[len(round_hulls) // 2]
+        if median_hull <= 0:
+            break
+        correction = math.sqrt(target_hull_area / median_hull)
+        # Damp the correction so it converges smoothly rather than oscillating.
+        correction = 1.0 + 0.6 * (correction - 1.0)
+        placement_radius = placement_radius * correction
+        placement_radius = max(1.0, min(placement_radius, max_placement_radius))
+
+    return best_dots if best_dots else place_one_round(placement_radius)
 
 
 def render_stimulus(
@@ -284,9 +312,16 @@ def calculate_ground_truth(
     dots: List[DotSpec],
     width: int,
     height: int,
-    filename: str
+    filename: str,
+    merge_gap_tolerance: float = 2.0
 ) -> dict:
-    """Calculate ground truth metrics for generated dots."""
+    """Calculate ground truth metrics for generated dots.
+
+    merge_gap_tolerance: edge-to-edge gap (px) below which a dot pair is
+    considered at risk of merging in the rendered image (and thus of being
+    miscounted by pixel-based detection). Set this to match the gap at which
+    your analyzer actually begins merging adjacent dots.
+    """
     if not dots:
         return None
     
@@ -321,7 +356,25 @@ def calculate_ground_truth(
         dist_matrix = distance.cdist(points, points, 'euclidean')
         np.fill_diagonal(dist_matrix, np.inf)
         avg_nn = float(np.mean(np.min(dist_matrix, axis=1)))
-    
+
+    # Placement degraded: any pair whose edges are closer than the merge
+    # tolerance will likely render as a merged/distorted blob, breaking the
+    # pixel-level ground truth. Measured directly from geometry rather than
+    # inferred from which placement branch ran.
+    placement_degraded = False
+    if n >= 2:
+        for a in range(n):
+            for b in range(a + 1, n):
+                center_dist = math.sqrt(
+                    (dots[a].x - dots[b].x)**2 + (dots[a].y - dots[b].y)**2
+                )
+                edge_gap = center_dist - (dots[a].radius + dots[b].radius)
+                if edge_gap < merge_gap_tolerance:
+                    placement_degraded = True
+                    break
+            if placement_degraded:
+                break
+
     field_area = width * height
     
     return {
@@ -340,7 +393,8 @@ def calculate_ground_truth(
         'occupancy': round(cumulative_area / field_area, 6),
         'avg_nearest_neighbor_distance': round(avg_nn, 2),
         'image_width': width,
-        'image_height': height
+        'image_height': height,
+        'placement_degraded': placement_degraded
     }
 
 
@@ -441,13 +495,32 @@ with col3:
 with st.expander("🔧 Advanced Options"):
     col1, col2 = st.columns(2)
     with col1:
-        control_hull = st.checkbox("Control convex hull area (experimental)", value=False,
-                                   help="Attempt to constrain spatial extent of dots")
-        if control_hull:
-            target_hull = st.number_input("Target hull area (px²)", 
+        hull_mode = st.radio(
+            "Convex hull control",
+            ["Off (random placement)", "Constant (target one hull)", "Varied (range of hulls)"],
+            index=0,
+            help="Off: dots scattered freely. Constant: aim for one hull area. "
+                 "Varied: spread hull across a range, for building a pool to select from."
+        )
+        if hull_mode.startswith("Constant"):
+            target_hull = st.number_input("Target hull area (px²)",
                                           min_value=1000, max_value=500000, value=50000)
+            hull_range = None
+        elif hull_mode.startswith("Varied"):
+            target_hull = None
+            hc1, hc2 = st.columns(2)
+            with hc1:
+                hull_min = st.number_input("Min hull area (px²)",
+                                           min_value=1000, max_value=500000, value=12000)
+            with hc2:
+                hull_max = st.number_input("Max hull area (px²)",
+                                           min_value=1000, max_value=500000, value=95000)
+            hull_range = (min(hull_min, hull_max), max(hull_min, hull_max))
+            st.caption("Defaults tuned for ~400×400 px and modest N. "
+                       "Raise the minimum for high N, where dots can't pack as tightly.")
         else:
             target_hull = None
+            hull_range = None
     
     with col2:
         random_seed = st.number_input("Random seed (0 = random)", 
@@ -483,10 +556,16 @@ with preview_col1:
             target_cumulative_area=target_area
         )
         
-        if control_hull and target_hull:
+        if hull_mode.startswith("Constant") and target_hull:
             preview_dots = place_dots_convex_hull_controlled(
                 n=preview_n, radii=preview_radii, width=img_width, height=img_height,
                 margin=margin, min_spacing=min_spacing, target_hull_area=target_hull
+            )
+        elif hull_mode.startswith("Varied") and hull_range:
+            preview_target = random.uniform(hull_range[0], hull_range[1])
+            preview_dots = place_dots_convex_hull_controlled(
+                n=preview_n, radii=preview_radii, width=img_width, height=img_height,
+                margin=margin, min_spacing=min_spacing, target_hull_area=preview_target
             )
         else:
             preview_dots = place_dots_random(
@@ -565,7 +644,9 @@ if st.button("🎲 Generate Stimuli", type="primary", width='stretch'):
         )
         
         # Place dots
-        if control_hull and target_hull:
+        requested_hull = None
+        if hull_mode.startswith("Constant") and target_hull:
+            requested_hull = target_hull
             dots = place_dots_convex_hull_controlled(
                 n=n,
                 radii=radii,
@@ -574,6 +655,17 @@ if st.button("🎲 Generate Stimuli", type="primary", width='stretch'):
                 margin=margin,
                 min_spacing=min_spacing,
                 target_hull_area=target_hull
+            )
+        elif hull_mode.startswith("Varied") and hull_range:
+            requested_hull = random.uniform(hull_range[0], hull_range[1])
+            dots = place_dots_convex_hull_controlled(
+                n=n,
+                radii=radii,
+                width=img_width,
+                height=img_height,
+                margin=margin,
+                min_spacing=min_spacing,
+                target_hull_area=requested_hull
             )
         else:
             dots = place_dots_random(
@@ -598,6 +690,8 @@ if st.button("🎲 Generate Stimuli", type="primary", width='stretch'):
         # Calculate ground truth
         filename = f"{filename_prefix}_{i+1:04d}.png"
         metrics = calculate_ground_truth(dots, img_width, img_height, filename)
+        if requested_hull is not None:
+            metrics['_requested_hull'] = requested_hull
         
         results.append(metrics)
         images.append((filename, image))
@@ -606,7 +700,60 @@ if st.button("🎲 Generate Stimuli", type="primary", width='stretch'):
     
     status_text.empty()
     progress_bar.empty()
-    
+
+    # --- Reachability check (Varied mode): did realized hulls reach the
+    # requested range, or did some N's get pinned near an edge because dots
+    # couldn't pack tighter / spread wider? Reported per N, plain language,
+    # using observed values only. ---
+    if hull_mode.startswith("Varied") and hull_range:
+        req_lo, req_hi = hull_range
+        span = max(1.0, req_hi - req_lo)
+        edge_band = 0.05 * span  # "near the edge" = within 5% of the span
+        by_n = {}
+        for m in results:
+            by_n.setdefault(m['number'], []).append(m['convex_hull_area'])
+        messages = []
+        for n_val in sorted(by_n):
+            hulls = by_n[n_val]
+            realized_lo, realized_hi = min(hulls), max(hulls)
+            near_lo = sum(1 for h in hulls if h <= realized_lo + edge_band)
+            near_hi = sum(1 for h in hulls if h >= realized_hi - edge_band)
+            frac_lo = near_lo / len(hulls)
+            frac_hi = near_hi / len(hulls)
+            # Couldn't go as compact as asked: realized floor sits well above requested floor
+            too_compact = (realized_lo > req_lo + edge_band) and (frac_lo > 0.20)
+            # Couldn't spread as wide as asked: realized ceiling sits well below requested ceiling
+            too_spread = (realized_hi < req_hi - edge_band) and (frac_hi > 0.20)
+            if too_compact:
+                messages.append(
+                    f"N={n_val}: couldn't go as compact as requested. "
+                    f"Asked from {req_lo:,.0f}; smallest reached was {realized_lo:,.0f} px²."
+                )
+            if too_spread:
+                messages.append(
+                    f"N={n_val}: couldn't spread as wide as requested. "
+                    f"Asked up to {req_hi:,.0f}; largest reached was {realized_hi:,.0f} px²."
+                )
+        if messages:
+            st.warning(
+                "Some stimuli didn't reach the hull range you requested:\n\n"
+                + "\n\n".join(messages)
+            )
+
+    # --- Degraded-placement check: dots ended up close enough to merge in
+    # the rendered image, which can break pixel-based detection downstream. ---
+    n_degraded = sum(1 for m in results if m.get('placement_degraded'))
+    if n_degraded > 0:
+        st.warning(
+            f"{n_degraded} of {len(results)} stimuli have dots close enough that they "
+            f"may merge when rendered (flagged as placement_degraded in the CSV). "
+            f"Consider fewer or smaller dots, or a larger hull, for those."
+        )
+
+    # Strip internal-only key before results reach the table/CSV
+    for m in results:
+        m.pop('_requested_hull', None)
+
     # Store in session state
     st.session_state['results'] = results
     st.session_state['images'] = images
